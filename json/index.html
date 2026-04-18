@@ -1,91 +1,68 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>JSON Download</title>
-  </head>
-  <body>
-    <script>
-      const EMBEDDED_PAYLOAD = {"v":1,"alg":"AES-256-CTR","kdf":"PBKDF2-SHA256","iterations":310000,"salt":"a0dDYeC1ZgVZta/0E0AREA==","iv":"j/YSHBosTVgDQ/JIGbRj5A==","data":"lErOj23SdG7jQYNZdJcDpce/cjiDRADPAq/Qsim8k+6PLdKQIgphOBo5jXlmFZh6thpAfkFGWDgzpA6BMzrMNijZGIgRClT5fm2AJjest1hzk2mQrWWpPWM2JAdBHsRRkF4r1WQRCUNU6zfSlUn7X/z8SfgPOqjUv24nIsOjfLLIT+VoKa2HV5lZdyD7n16PlOiy+FhZp4JYNFByBUeXYI5l4yKVJITvFm4FslgRO6jTCEYrF4CCP5xdtz3YOt5R7DdztQNcs/QIV2WvOTvYkL226tC8XROpdRHC9fMJbXWzZ3EO3PS4MbrBqnrvXZk8Dar9baCg4os/7uahbaoglK8zMFozfubEAQm8U7WlRfR0qeOqZxMoAeHk3sfvWJE9Ovk51qP1LECLYLFPTWvo34yK1ucUvOKtNHY0rSYOh3QugLj3/d9yF//8ckPL2F5uR63cneknjxAxVA04Lab3zXWx/ZqBrEeTE83U3O7VqamGQ3MTCzrBuqmzWP4iWh/IQ/kCKvFGz+dRWGI+326kk/hQuaOyYk1cN+H/Tc4Pq+25+/NXy7knfskA1DZQxYai2S1nq/vnmJVq4Hfw7AYobf6AxpqdLs18eN68UGsGt50ZxqQFQxZ9r4X08WBWEkccFWOsyrVjgLd+ycE=","filename":"file.json","mimeType":"application/json"};
-      const encoder = new TextEncoder();
 
-      function b64ToBytes(b64) {
-        const binary = atob(b64 || "");
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON Download</title>
+</head>
+
+<body>
+  <script>
+    const EMBEDDED_USERS = { "yeet": { "v": 1, "alg": "AES-256-CTR", "kdf": "PBKDF2-SHA256", "iterations": 310000, "salt": "YC63+D8F77R6aRmnCjeTUQ==", "iv": "m4jPskaPguZdqHHm6STHjQ==", "data": "pXQ0TNkhvfzGmoPld64irgzQ0XCYgHQ0iKTn1BflYmwHQjB+3WHzINFaGnoKQvu8qF8Gjd/I2kScJqxeId9t2gbmX9lixoAdSHCd7nU+aIMTM51WV6sCdA4rhv0G/4l9P6qbzGanQEYWPm99VWDgfNkg6VLQudbyvD42ff4gZTJl62hXxSTk4AVkVUqibWL4drTsCyZL7Um0Fku0ywYbpFBIJlFxBQaPTCXqSckqg80OyXLadODEpgGTCkwQvog+Lou13blaVro7FFqCLYOW0u35AA1qB7NnMZMPa5/kRbn74KzmKJc45LnA9N5ysQy4gBRKbTJbe4PwqJkYuAx/bZAFKzpHY6MYfDlxer++q/r0ncAwvjTeanAotYiLnLYPADtykeHCbu5F5TE4HSPNN0cQIgfkFc6vVAY7aX5HKJRAoEsYJXCaaE7V10hgZb9tt7vK2Ps9agfa8mCSgR9/v+CCTi8TymHMvxWafgmWhzPfZz0e84Pz/yg2Zl2kcY5nEpYW5BWoOfet9AlwKjs6NEc7oPAVOl0LZtLObb4YlUXFdqq12NWgY6lM563w0Ij/DwX4FMQX3mNAV1ySQAfjyi9+vUwDT1Z7EzU=", "filename": "yeet.json", "mimeType": "application/json" } };
+    const DEFAULT_FILENAME = "encrypted.json";
+
+    function downloadJsonObject(data, fileName) {
+      const text = JSON.stringify(data, null, 2) + "\n";
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || DEFAULT_FILENAME;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function getParams() {
+      const params = new URLSearchParams(window.location.search);
+      return {
+        user: (params.get("user") || "").trim(),
+      };
+    }
+
+    async function processRequest(user, options = {}) {
+      const isManual = Boolean(options.isManual);
+      const payload = EMBEDDED_USERS && user ? EMBEDDED_USERS[user] : null;
+
+      if (!payload) {
+        downloadJsonObject({}, DEFAULT_FILENAME);
+        return;
       }
 
-      async function deriveKey(passphrase, saltBytes, iterations) {
-        const keyMaterial = await crypto.subtle.importKey(
-          "raw",
-          encoder.encode(passphrase),
-          "PBKDF2",
-          false,
-          ["deriveKey"],
-        );
+      const outputFileName = isManual
+        ? user + ".json"
+        : user + ".encrypted.json";
+      downloadJsonObject(payload, outputFileName);
+    }
 
-        return crypto.subtle.deriveKey(
-          {
-            name: "PBKDF2",
-            hash: "SHA-256",
-            salt: saltBytes,
-            iterations,
-          },
-          keyMaterial,
-          { name: "AES-CTR", length: 256 },
-          false,
-          ["decrypt"],
-        );
+    async function run() {
+      const { user } = getParams();
+      if (user) {
+        await processRequest(user, { isManual: false });
+        return;
       }
 
-      async function decryptPayload(payload, passphrase) {
-        const salt = b64ToBytes(payload.salt);
-        const iv = b64ToBytes(payload.iv);
-        const data = b64ToBytes(payload.data);
-        const key = await deriveKey(passphrase, salt, payload.iterations || 310000);
+      const input = window.prompt("Enter user:key") || "";
+      const delimiterIndex = input.indexOf(":");
+      const manualUser =
+        delimiterIndex === -1 ? "" : input.slice(0, delimiterIndex).trim();
+      await processRequest(manualUser, { isManual: true });
+    }
 
-        const decrypted = await crypto.subtle.decrypt(
-          {
-            name: "AES-CTR",
-            counter: iv,
-            length: 64,
-          },
-          key,
-          data,
-        );
+    run();
+  </script>
+</body>
 
-        return new Uint8Array(decrypted);
-      }
-
-      function downloadBytes(bytes, fileName, mimeType) {
-        const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fileName || "download.json";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      }
-
-      async function run() {
-        const passphrase = window.prompt("Enter key") || "";
-        const payload = EMBEDDED_PAYLOAD || {};
-
-        try {
-          const bytes = await decryptPayload(payload, passphrase);
-          downloadBytes(bytes, payload.filename || "download.json", payload.mimeType || "application/json");
-        } catch (_error) {
-          downloadBytes(new Uint8Array(), payload.filename || "download.json", payload.mimeType || "application/json");
-        }
-      }
-
-      run();
-    </script>
-  </body>
 </html>
