@@ -1,68 +1,65 @@
 <!doctype html>
 <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JSON Download</title>
+  </head>
+  <body>
+    <script>
+      const EMBEDDED_USERS = {"yeet":{"v":1,"alg":"AES-256-CTR","kdf":"PBKDF2-SHA256","iterations":310000,"salt":"PzRpDaKpIKD+8McXbCX9AQ==","iv":"YCj9AaXUHxLVSGzoe8EWfg==","data":"sFtSWQ7OZfrswf/dJcgcSNJMfaqw7YpnoBDwSMcW8RYSAmLpqq+H1hRNMT2W7ZcCqfanQD0ACC+SzCxEOY0uY68ixNC8QUdWvFxONLqUdSyuzWkr8XgweC2y2BoQP36Vf9cI5Gig5dtL9E3raJ/WXOf9KAChQ5LeG/VGZDiHcFcPs71s2jiC3O9vio2fHqGqQ84Rlfrwko6tEpVUCGhtayZn2eFbDoJJFwy282aT+fWrKDrFrcYafDL3Wo68FXI34iU1A4VeI7TUDqms2ZowvquN6NMySziiHTjnDnkAVsIh2UwEp2QgByZp16Ob0E/WuzKa/68ZI8WOGmhRUI5FIFFe1Lna9syx8c/R1fUuOTzkM11Ebts2mUXjke9hidzU7nBGz3p1b4aLvRZZdmSsP3GU2l+k4KKlITq9br1LAegc1WXxKidP+N1tNn0E3vofEdjgZ8lbyVYRBkMTcZysqMSBaUQPXHE0xNmmOwrW1LlgIGZi6mOGQoZbvmPepxgHHcMS2qwusa6Eo5FK0Kcxr3hPs4OZmYX+NQdM/lp0skdLRfX7JNu+ekEbZjxUj+fY0ePu8Rkhm3R2f46KEYMhS//f0rxHhW2JFoKmJ60vtbjCvl9pQheovMBxKeuUOP+ZX9IL2p0VK61/vs2oxMYRK+B+AQWWqAroVmLpTRW6CU6AD8dL/tStpUGGBlAJILbM","filename":"yeet.json","mimeType":"application/json"}};
+      const DEFAULT_FILENAME = "encrypted.json";
 
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>JSON Download</title>
-</head>
-
-<body>
-  <script>
-    const EMBEDDED_USERS = { "yeet": { "v": 1, "alg": "AES-256-CTR", "kdf": "PBKDF2-SHA256", "iterations": 310000, "salt": "YC63+D8F77R6aRmnCjeTUQ==", "iv": "m4jPskaPguZdqHHm6STHjQ==", "data": "pXQ0TNkhvfzGmoPld64irgzQ0XCYgHQ0iKTn1BflYmwHQjB+3WHzINFaGnoKQvu8qF8Gjd/I2kScJqxeId9t2gbmX9lixoAdSHCd7nU+aIMTM51WV6sCdA4rhv0G/4l9P6qbzGanQEYWPm99VWDgfNkg6VLQudbyvD42ff4gZTJl62hXxSTk4AVkVUqibWL4drTsCyZL7Um0Fku0ywYbpFBIJlFxBQaPTCXqSckqg80OyXLadODEpgGTCkwQvog+Lou13blaVro7FFqCLYOW0u35AA1qB7NnMZMPa5/kRbn74KzmKJc45LnA9N5ysQy4gBRKbTJbe4PwqJkYuAx/bZAFKzpHY6MYfDlxer++q/r0ncAwvjTeanAotYiLnLYPADtykeHCbu5F5TE4HSPNN0cQIgfkFc6vVAY7aX5HKJRAoEsYJXCaaE7V10hgZb9tt7vK2Ps9agfa8mCSgR9/v+CCTi8TymHMvxWafgmWhzPfZz0e84Pz/yg2Zl2kcY5nEpYW5BWoOfet9AlwKjs6NEc7oPAVOl0LZtLObb4YlUXFdqq12NWgY6lM563w0Ij/DwX4FMQX3mNAV1ySQAfjyi9+vUwDT1Z7EzU=", "filename": "yeet.json", "mimeType": "application/json" } };
-    const DEFAULT_FILENAME = "encrypted.json";
-
-    function downloadJsonObject(data, fileName) {
-      const text = JSON.stringify(data, null, 2) + "\n";
-      const blob = new Blob([text], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName || DEFAULT_FILENAME;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
-
-    function getParams() {
-      const params = new URLSearchParams(window.location.search);
-      return {
-        user: (params.get("user") || "").trim(),
-      };
-    }
-
-    async function processRequest(user, options = {}) {
-      const isManual = Boolean(options.isManual);
-      const payload = EMBEDDED_USERS && user ? EMBEDDED_USERS[user] : null;
-
-      if (!payload) {
-        downloadJsonObject({}, DEFAULT_FILENAME);
-        return;
+      function downloadJsonObject(data, fileName) {
+        const text = JSON.stringify(data, null, 2) + "\n";
+        const blob = new Blob([text], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName || DEFAULT_FILENAME;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
       }
 
-      const outputFileName = isManual
-        ? user + ".json"
-        : user + ".encrypted.json";
-      downloadJsonObject(payload, outputFileName);
-    }
-
-    async function run() {
-      const { user } = getParams();
-      if (user) {
-        await processRequest(user, { isManual: false });
-        return;
+      function getParams() {
+        const params = new URLSearchParams(window.location.search);
+        return {
+          user: (params.get("user") || "").trim(),
+        };
       }
 
-      const input = window.prompt("Enter user:key") || "";
-      const delimiterIndex = input.indexOf(":");
-      const manualUser =
-        delimiterIndex === -1 ? "" : input.slice(0, delimiterIndex).trim();
-      await processRequest(manualUser, { isManual: true });
-    }
+      async function processRequest(user, options = {}) {
+        const isManual = Boolean(options.isManual);
+        const payload = EMBEDDED_USERS && user ? EMBEDDED_USERS[user] : null;
 
-    run();
-  </script>
-</body>
+        if (!payload) {
+          downloadJsonObject({}, DEFAULT_FILENAME);
+          return;
+        }
 
+        const outputFileName = isManual
+          ? user + ".json"
+          : user + ".encrypted.json";
+        downloadJsonObject(payload, outputFileName);
+      }
+
+      async function run() {
+        const { user } = getParams();
+        if (user) {
+          await processRequest(user, { isManual: false });
+          return;
+        }
+
+        const input = window.prompt("Enter user:key") || "";
+        const delimiterIndex = input.indexOf(":");
+        const manualUser =
+          delimiterIndex === -1 ? "" : input.slice(0, delimiterIndex).trim();
+        await processRequest(manualUser, { isManual: true });
+      }
+
+      run();
+    </script>
+  </body>
 </html>
