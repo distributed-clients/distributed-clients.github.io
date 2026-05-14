@@ -46,1461 +46,630 @@
     </div>
     <!-- Hidden textarea for clipboard content -->
     <textarea id="hiddenText" style="display: none; white-space: pre">
-# EXP 1
-import threading
-import time
-import requests
-from flask import Flask, request, jsonify
-import logging
-import random
-
-# --- Global State & Configuration ---
-# Disable Flask's default logging to keep the output clean
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-SERVERS = {}  # A dictionary to hold our server objects
-TRANSACTION_LOG = []
-LEADER_ID = None
-
-
-# --- Server Class Definition ---
-class Server:
-    def __init__(self, server_id, port):
-        self.id = server_id
-        self.port = port
-        self.is_leader = False
-        self.is_active = True
-        self.lamport_clock = 0
-        self.accounts = {"A": 1000, "B": 500}  # Shared account balances for simplicity
-
-        # Each server runs its own web server (Flask app)
-        self.app = Flask(__name__)
-        self._setup_routes()
-
-    def _setup_routes(self):
-        """Defines the API endpoints for this server."""
-
-        # Endpoint for an election message
-        @self.app.route("/election", methods=["POST"])
-        def handle_election():
-            # If my ID is higher, I'll take over the election process.
-            if self.id > request.json["id"]:
-                # Start my own election in a new thread
-                threading.Thread(target=self.start_election).start()
-                return jsonify({"response": "OK, I am taking over"})
-            # Otherwise, I yield to the sender who has a higher ID.
-            return jsonify({"response": "yield"})
-
-        # Endpoint for announcing the new leader
-        @self.app.route("/announce", methods=["POST"])
-        def handle_announcement():
-            global LEADER_ID
-            LEADER_ID = request.json["leader_id"]
-            self.is_leader = self.id == LEADER_ID
-            self.lamport_clock = max(self.lamport_clock, request.json["clock"]) + 1
-            if self.is_leader:
-                print(f"[Server {self.id}] --- I am now the LEADER ---")
-            return jsonify({"response": "acknowledged"})
-
-        # Endpoint for processing client transactions
-        @self.app.route("/transaction", methods=["POST"])
-        def handle_transaction():
-            if not self.is_leader:
-                return jsonify({"error": "I am not the leader"}), 400
-
-            self.lamport_clock += 1  # Increment clock for local event
-            trans = request.json
-            trans["timestamp"] = self.lamport_clock  # Attach Lamport timestamp
-
-            # Simple transaction logic
-            if trans["type"] == "deposit":
-                self.accounts[trans["account"]] += trans["amount"]
-            elif trans["type"] == "withdraw":
-                self.accounts[trans["account"]] -= trans["amount"]
-
-            TRANSACTION_LOG.append(trans)
-            print(
-                f"[Leader {self.id}] Processed TX (Clock={self.lamport_clock}): {trans['type']} {trans['amount']} on {trans['account']}. Balances: {self.accounts}"
-            )
-            return jsonify({"status": "success", "balances": self.accounts})
-
-    def start_election(self):
-        """Initiates a leader election using the Bully Algorithm."""
-        print(f"[Server {self.id}] Starting an election.")
-        self.lamport_clock += 1
-
-        # Check if any server with a higher ID is active
-        higher_servers = [s_id for s_id in SERVERS if s_id > self.id]
-        if not higher_servers:
-            self.announce_as_leader()
-            return
-
-        got_response = False
-        for s_id in higher_servers:
-            try:
-                url = f"http://127.0.0.1:{SERVERS[s_id].port}/election"
-                res = requests.post(url, json={"id": self.id}, timeout=0.5)
-                if res.status_code == 200:
-                    got_response = True  # A higher server is alive and will take over
-            except requests.exceptions.RequestException:
-                pass  # This server is down, which is fine
-
-        # If no higher server responded, I am the leader.
-        if not got_response:
-            self.announce_as_leader()
-
-    def announce_as_leader(self):
-        """Announce to all other servers that this server is the new leader."""
-        global LEADER_ID
-        LEADER_ID = self.id
-        self.is_leader = True
-        print(f"[Server {self.id}] --- Elected as the new LEADER ---")
-
-        self.lamport_clock += 1
-        for s_id, server_node in SERVERS.items():
-            if s_id != self.id and server_node.is_active:
-                try:
-                    url = f"http://127.0.0.1:{server_node.port}/announce"
-                    requests.post(
-                        url,
-                        json={"leader_id": self.id, "clock": self.lamport_clock},
-                        timeout=0.5,
-                    )
-                except requests.exceptions.RequestException:
-                    pass  # Ignore if a server is unreachable
-
-    def run(self):
-        """Run the Flask server in a separate daemon thread."""
-        thread = threading.Thread(
-            target=lambda: self.app.run(port=self.port), daemon=True
-        )
-        thread.start()
-
-
-# --- Leader Monitoring and Client Simulation ---
-
-
-def monitor_leader():
-    """A simple function to periodically check if the leader is alive."""
-    while True:
-        time.sleep(5)  # Check every 5 seconds
-        if LEADER_ID is None or not SERVERS[LEADER_ID].is_active:
-            continue
-
-        try:
-            # Simple ping to the leader's port
-            url = f"http://127.0.0.1:{SERVERS[LEADER_ID].port}/transaction"
-            requests.post(url, json={}, timeout=0.5)
-        except requests.exceptions.RequestException:
-            print(f"\n[Monitor] Leader {LEADER_ID} seems to be down!")
-            SERVERS[LEADER_ID].is_active = False  # Mark as crashed
-
-            # Pick a random alive server to start a new election
-            alive_servers = [s for s in SERVERS.values() if s.is_active]
-            if alive_servers:
-                random_server = random.choice(alive_servers)
-                print(
-                    f"[Monitor] Telling Server {random_server.id} to start a new election."
-                )
-                threading.Thread(target=random_server.start_election).start()
-
-
-def client_simulation(server_to_crash):
-    """Simulates a client sending transactions, and a leader crash happening."""
-    print("\n--- Client starting transactions ---")
-    time.sleep(2)  # Wait for initial election
-
-    for i in range(2):
-        if LEADER_ID:
-            try:
-                url = f"http://127.0.0.1:{SERVERS[LEADER_ID].port}/transaction"
-                requests.post(
-                    url, json={"type": "deposit", "account": "A", "amount": 100}
-                )
-                time.sleep(1)
-            except requests.exceptions.RequestException:
-                print("[Client] Could not connect to leader. Waiting...")
-
-    print(f"\n--- SIMULATING CRASH of Leader Server {server_to_crash} ---")
-    SERVERS[server_to_crash].is_active = False  # The monitor will detect this
-
-    print("\n--- Client waiting for new leader... ---")
-    time.sleep(8)  # Wait for a new election to complete
-
-    print("\n--- Client resuming transactions with NEW leader ---")
-    for i in range(2):
-        if LEADER_ID:
-            try:
-                url = f"http://127.0.0.1:{SERVERS[LEADER_ID].port}/transaction"
-                requests.post(
-                    url, json={"type": "withdraw", "account": "B", "amount": 50}
-                )
-                time.sleep(1)
-            except requests.exceptions.RequestException:
-                print("[Client] Could not connect to new leader. Waiting...")
-
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    # 1. Create and run 4 servers
-    num_servers = 4
-    for i in range(num_servers):
-        server_id = i + 1
-        port = 5000 + server_id
-        SERVERS[server_id] = Server(server_id, port)
-        SERVERS[server_id].run()
-        print(f"Server {server_id} started on port {port}")
-
-    # 2. Start the initial election
-    print("\n--- Starting initial leader election ---")
-    # The server with the highest ID should win, let's have it start.
-    SERVERS[num_servers].start_election()
-
-    # 3. Start the client simulation which will also trigger a crash
-    client_simulation(server_to_crash=num_servers)  # Crash the initial leader
-
-    time.sleep(2)
-    print("\n--- Simulation finished ---")
-
-    # 4. Show the final transaction log, ordered by the Lamport timestamps
-    print("\nFinal Global Transaction Log (ordered by Lamport clock):")
-    sorted_log = sorted(TRANSACTION_LOG, key=lambda x: x["timestamp"])
-    for entry in sorted_log:
-        print(f"  Timestamp: {entry['timestamp']}, Transaction: {entry}")
-# EXP 2
-import xmlrpc.server
-import xmlrpc.client
-import threading
-import time
-from socketserver import ThreadingMixIn
-
-
-# --- 1. The Server's Defined Remote Functions ---
-# --- CHANGE 2: Manually create the ThreadingXMLRPCServer class ---
-class ThreadingXMLRPCServer(ThreadingMixIn, xmlrpc.server.SimpleXMLRPCServer):
-    """
-    This class is a combination of a Threading Server and an XML-RPC Server.
-    This is the standard way to create a multithreaded XML-RPC server.
-    """
-
-    pass
-
-
-# --- 1. The Server's Defined Remote Functions ---
-
-
-def add_numbers(numbers):
-    """
-    A specific, safe function exposed by the server.
-    It takes a list of numbers and returns their sum.
-    """
-    thread_name = threading.current_thread().name
-    print(f"[Server - {thread_name}] Executing 'add_numbers' with {numbers}")
-    time.sleep(1)  # Simulate work
-    return sum(numbers)
-
-
-def concatenate_strings(strings):
-    """
-    Another specific, safe function.
-    It takes a list of strings and joins them together.
-    """
-    thread_name = threading.current_thread().name
-    print(f"[Server - {thread_name}] Executing 'concatenate_strings' with {strings}")
-    time.sleep(1)  # Simulate work
-    return "".join(strings)
-
-
-# --- 2. The Server Setup ---
-
-
-def run_server():
-    """Initializes and runs the multithreaded RPC server."""
-    server_address = ("localhost", 8000)
-    # Threading server handles each request in a new thread
-    server = ThreadingXMLRPCServer(server_address)
-
-    # Register the functions with the server, giving them names clients will use.
-    # The client will call 'add', which will map to our 'add_numbers' function.
-    server.register_function(add_numbers, "add")
-    server.register_function(concatenate_strings, "concat")
-
-    print(
-        f"RPC Server with defined methods is running on http://{server_address[0]}:{server_address[1]}..."
-    )
-    print("Available methods: add, concat")
-    server.serve_forever()
-
-
-# --- 3. The Client Simulation ---
-
-
-def run_client(method_to_call, arguments, client_id):
-    """
-    Simulates a client calling a specific remote method.
-    """
-    proxy = xmlrpc.client.ServerProxy("http://localhost:8000/")
-
-    try:
-        print(f"[Client {client_id}] Calling remote method '{method_to_call}'...")
-
-        # Get the function from the proxy object and call it with arguments
-        # For example, if method_to_call is 'add', this becomes proxy.add(arguments)
-        remote_function = getattr(proxy, method_to_call)
-        result = remote_function(arguments)
-
-        print(f"[Client {client_id}] Received result: {result}")
-    except Exception as e:
-        print(f"[Client {client_id}] Error: {e}")
-
-
-# --- 4. Main Simulation Execution ---
-
-if __name__ == "__main__":
-    # Start the server in a background thread
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    time.sleep(1)
-
-    print("--- Simulating two clients calling different methods concurrently ---\n")
-
-    # Define the tasks for two different clients
-    task1_method = "add"
-    task1_args = [10, 25, 100, -5]
-
-    task2_method = "concat"
-    task2_args = ["Learning ", "about ", "RPC ", "is ", "fun!"]
-
-    # Create and start threads for the clients
-    client1 = threading.Thread(target=run_client, args=(task1_method, task1_args, 1))
-    client2 = threading.Thread(target=run_client, args=(task2_method, task2_args, 2))
-
-    client1.start()
-    client2.start()
-
-    # Wait for both client threads to complete
-    client1.join()
-    client2.join()
-
-    print("\n--- Simulation finished ---")
-# EXP 3
-from flask import Flask, request, jsonify
-import threading
-import time
-import uuid
-import requests  # The Python equivalent of curl
-
-# --- SERVER CODE (Identical to before) ---
-
-API_KEYS = {}
-keys_lock = threading.Lock()
-KEY_LIFESPAN_SECONDS = 300
-BLOCKED_TIMEOUT_SECONDS = 60
-app = Flask(__name__)
-
-
-@app.route("/keys/create", methods=["POST"])
-def create_key():
-    new_key = str(uuid.uuid4())
-    with keys_lock:
-        API_KEYS[new_key] = {
-            "status": "available",
-            "expires_at": time.time() + KEY_LIFESPAN_SECONDS,
-            "blocked_until": 0,
-        }
-    print(f"[Server] Created Key: {new_key}")
-    return jsonify({"api_key": new_key}), 201
-
-
-@app.route("/keys/available", methods=["GET"])
-def get_available_key():
-    with keys_lock:
-        for key, info in API_KEYS.items():
-            if info["status"] == "available":
-                info["status"] = "blocked"
-                info["blocked_until"] = time.time() + BLOCKED_TIMEOUT_SECONDS
-                print(f"[Server] Assigned Key: {key}")
-                return jsonify({"api_key": key})
-    return jsonify({"error": "No available keys"}), 404
-
-
-# ... (other server endpoints like /unblock and /keep-alive are the same) ...
-
-
-def cleanup_worker():
-    while True:
-        time.sleep(5)
-        current_time = time.time()
-        keys_to_delete = []
-        with keys_lock:
-            for key, info in API_KEYS.items():
-                if current_time > info["expires_at"]:
-                    keys_to_delete.append(key)
-                elif (
-                    info["status"] == "blocked" and current_time > info["blocked_until"]
-                ):
-                    info["status"] = "available"
-                    print(f"[Cleanup] Auto-unblocked Key: {key}")
-            for key in keys_to_delete:
-                del API_KEYS[key]
-                print(f"[Cleanup] Deleted Expired Key: {key}")
-
-
-# --- NEW: Python Client Simulation Code ---
-
-
-def run_client_simulation():
-    """Uses the 'requests' library to act as a client."""
-    base_url = "http://127.0.0.1:5000"
-
-    print("\n--- Starting Client Simulation ---")
-
-    # A) Create a key
-    print("\n[Client] 1. Creating a new key...")
-    response = requests.post(f"{base_url}/keys/create")
-    data = response.json()
-    my_key = data["api_key"]
-    print(f"[Client]    ...Success! Got key: {my_key}")
-    time.sleep(1)
-
-    # B) Get an available key
-    print("\n[Client] 2. Getting an available key...")
-    response = requests.get(f"{base_url}/keys/available")
-    print(
-        f"[Client]    ...Success! The server assigned us key: {response.json()['api_key']}"
-    )
-    time.sleep(1)
-
-    # C) Try to get another one (should fail)
-    print("\n[Client] 3. Trying to get another key (this should fail)...")
-    response = requests.get(f"{base_url}/keys/available")
-    if response.status_code == 404:
-        print(
-            f"[Client]    ...Success! Server correctly said: {response.json()['error']}"
-        )
-    else:
-        print("[Client]    ...Error! This should have failed.")
-    time.sleep(1)
-
-    print("\n--- Simulation Complete ---")
-
-
-# --- MODIFIED: Main Execution Block ---
-
-if __name__ == "__main__":
-    # 1. Start the Flask server in a background daemon thread
-    server_thread = threading.Thread(
-        target=lambda: app.run(port=5000, threaded=True), daemon=True
-    )
-    server_thread.start()
-
-    # 2. Start the cleanup worker in its own thread
-    cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
-    cleanup_thread.start()
-
-    # 3. Give the server a moment to start up
-    time.sleep(1)
-
-    # 4. Run the client simulation from the main thread
-    run_client_simulation()
-# EXP 4
-# uses Berkeley's Algorithm
-import threading
-import time
-import random
-from datetime import datetime, timedelta
-
-# --- Global State & Configuration ---
-NUM_SERVERS = 3
-SIMULATION_TIME_SECONDS = 8
-LOG_MANAGER = []
-SERVER_OFFSETS = {i + 1: timedelta(0) for i in range(NUM_SERVERS)}
-run_simulation = True
-
-# A lock to safely append to the global log manager from multiple threads
-log_lock = threading.Lock()
-
-# --- Server Simulation ---
-
-
-def server_node(server_id):
-    """
-    Simulates a server with its own drifting clock that generates logs.
-    """
-    # Simulate an inaccurate clock with a random drift
-    # The drift makes this server's clock run faster or slower than real time.
-    drift = random.uniform(-0.1, 0.1)
-    current_time = datetime.now()
-
-    print(
-        f"[Server {server_id}] Started with a clock drift of {drift:.2f}s per second."
-    )
-
-    while run_simulation:
-        # Simulate time passing and apply drift
-        time.sleep(1)
-        current_time += timedelta(seconds=1 + drift)
-
-        # Generate a log event periodically
-        if random.random() > 0.5:
-            log_entry = {
-                "server_id": server_id,
-                "raw_timestamp": current_time,
-                "event": f"Generated event on Server {server_id}",
-            }
-            with log_lock:
-                LOG_MANAGER.append(log_entry)
-            print(
-                f"[Server {server_id}] Logged event at raw time {current_time.strftime('%H:%M:%S.%f')}"
-            )
-
-
-# --- Berkeley Algorithm Time Daemon ---
-
-
-def time_daemon():
-    """
-    Acts as the master node for Berkeley's Algorithm. Periodically polls servers,
-    calculates the average time, and computes the offsets for synchronization.
-
-    Note: In a real system, this would poll over a network. Here we just read
-    the simulated times from the server threads (which is a simplification).
-    For this simulation, we will just use the system time of the daemon as the
-    source of truth to calculate offsets against the servers' drifting clocks.
-    This demonstrates the principle of calculating and applying offsets.
-    """
-    print("[Daemon] Time Daemon started. Will synchronize every 3 seconds.")
-
-    while run_simulation:
-        time.sleep(3)
-        print("\n[Daemon] --- Starting synchronization round ---")
-
-        # In a real system, the daemon would ask each server for its time.
-        # Here, we simulate this by calculating the difference between the 'true'
-        # time (the daemon's clock) and what the server's clock *would* be.
-        # Since we can't directly access the 'current_time' variable of the
-        # server threads, we will just pre-calculate the expected drift.
-        # For a more realistic simulation, servers would need an API endpoint to expose their time.
-
-        # A simplified model for this simulation:
-        # We will assume the log manager has recent entries and use them to
-        # estimate the current clock offset of each server.
-
-        with log_lock:
-            if not LOG_MANAGER:
-                continue
-
-            latest_logs = {sid: None for sid in range(1, NUM_SERVERS + 1)}
-            for log in reversed(LOG_MANAGER):
-                if latest_logs[log["server_id"]] is None:
-                    latest_logs[log["server_id"]] = log["raw_timestamp"]
-                if all(latest_logs.values()):
-                    break
-
-            # Calculate offsets based on the daemon's current time
-            master_time = datetime.now()
-            time_diffs = []
-            for server_id, server_time in latest_logs.items():
-                if server_time:
-                    diff = master_time - server_time
-                    SERVER_OFFSETS[server_id] = diff
-                    time_diffs.append(diff)
-                    print(
-                        f"[Daemon] Server {server_id} clock is off by {diff.total_seconds():.2f}s"
-                    )
-
-        print("[Daemon] --- Synchronization round finished ---\n")
-
-
-# --- Main Execution ---
-
-if __name__ == "__main__":
-    # 1. Start the Time Daemon thread
-    daemon_thread = threading.Thread(target=time_daemon)
-    daemon_thread.start()
-
-    # 2. Start all the Server Node threads
-    server_threads = []
-    for i in range(NUM_SERVERS):
-        server_id = i + 1
-        thread = threading.Thread(target=server_node, args=(server_id,))
-        server_threads.append(thread)
-        thread.start()
-
-    # 3. Let the simulation run for a configured duration
-    time.sleep(SIMULATION_TIME_SECONDS)
-    run_simulation = False  # Signal all threads to stop
-
-    # 4. Wait for all threads to complete
-    for t in server_threads:
-        t.join()
-    daemon_thread.join()
-
-    print("\n" + "=" * 50)
-    print("--- SIMULATION FINISHED ---")
-    print("=" * 50 + "\n")
-
-    # 5. Show the logs ordered by their original, unsynchronized timestamps
-    print("--- 1. Logs ordered by RAW (unsynchronized) timestamp ---")
-    print("--- (This shows how events can appear out of order) ---\n")
-    sorted_by_raw = sorted(LOG_MANAGER, key=lambda x: x["raw_timestamp"])
-    for log in sorted_by_raw:
-        print(
-            f"RAW Time: {log['raw_timestamp'].strftime('%H:%M:%S.%f')} | Server ID: {log['server_id']} | Event: {log['event']}"
-        )
-
-    # 6. Show the logs ordered by the synchronized timestamps
-    print("\n\n--- 2. Logs ordered by SYNCHRONIZED timestamp ---")
-    print("--- (This shows the globally ordered timeline) ---\n")
-
-    # Add the synchronized timestamp to each log entry before sorting
-    for log in LOG_MANAGER:
-        log["sync_timestamp"] = log["raw_timestamp"] + SERVER_OFFSETS[log["server_id"]]
-
-    # Sort by the new synchronized timestamp, using server_id as a tie-breaker
-    sorted_by_sync = sorted(
-        LOG_MANAGER, key=lambda x: (x["sync_timestamp"], x["server_id"])
-    )
-    for log in sorted_by_sync:
-        print(
-            f"SYNC Time: {log['sync_timestamp'].strftime('%H:%M:%S.%f')} | (Raw: {log['raw_timestamp'].strftime('%H:%M:%S.%f')}) | Server ID: {log['server_id']}"
-        )
-
-# uses Lamport logical clocks
-import threading
-import time
-import random
-
-# --- Global State & Configuration ---
-NUM_SERVERS = 3
-SIMULATION_TIME_SECONDS = 5
-LOG_MANAGER = []
-run_simulation = True
-
-# A lock to safely append to the global log manager from multiple threads
-log_lock = threading.Lock()
-
-# --- Server Class with Lamport Clock Logic ---
-
-
-class Server:
-    def __init__(self, server_id, all_servers):
-        self.id = server_id
-        self.clock = 0
-        self.all_servers = (
-            all_servers  # A reference to all other servers for communication
-        )
-
-    def _increment_clock(self):
-        """Rule 1: Increment clock before any event."""
-        self.clock += 1
-
-    def _log_event(self, event_description):
-        """Helper to create and store a log entry."""
-        log_entry = {
-            "server_id": self.id,
-            "clock": self.clock,
-            "event": event_description,
-        }
-        with log_lock:
-            LOG_MANAGER.append(log_entry)
-        print(f"Server {self.id} | Clock: {self.clock} | {event_description}")
-
-    def local_event(self):
-        """Rule 1 (continued): An internal event occurs."""
-        self._increment_clock()
-        self._log_event("Generated a local log event.")
-
-    def send_message(self, target_server_id):
-        """Rule 2: Sending a message."""
-        self._increment_clock()
-        message = {"sender_id": self.id, "clock": self.clock}
-        self._log_event(f"Sent message to Server {target_server_id}.")
-
-        # Directly call the receive method of the target server to simulate sending
-        self.all_servers[target_server_id].receive_message(message)
-
-    def receive_message(self, message):
-        """Rule 3: Receiving a message."""
-        # Update local clock to be the max of local and received, then increment
-        self.clock = max(self.clock, message["clock"]) + 1
-        self._log_event(f"Received message from Server {message['sender_id']}.")
-
-    def run(self):
-        """The main loop for the server thread."""
-        while run_simulation:
-            # Randomly choose an action: either a local event or sending a message
-            if random.random() > 0.4:
-                self.local_event()
-            else:
-                # Choose a random server to send a message to (but not itself)
-                possible_targets = [sid for sid in self.all_servers if sid != self.id]
-                if possible_targets:
-                    target_id = random.choice(possible_targets)
-                    self.send_message(target_id)
-
-            # Wait for a random time to make the event order unpredictable
-            time.sleep(random.uniform(0.5, 1.5))
-
-
-# --- Main Execution ---
-
-if __name__ == "__main__":
-    # 1. Create all server instances
-    servers = {}
-    for i in range(1, NUM_SERVERS + 1):
-        # We pass the 'servers' dict to each server so they know about each other
-        servers[i] = Server(server_id=i, all_servers=servers)
-
-    # 2. Start all the Server threads
-    threads = []
-    for server_id, server_instance in servers.items():
-        thread = threading.Thread(target=server_instance.run)
-        threads.append(thread)
-        thread.start()
-        print(f"Started Server {server_id}...")
-
-    # 3. Let the simulation run for a configured duration
-    time.sleep(SIMULATION_TIME_SECONDS)
-    run_simulation = False  # Signal all threads to stop
-
-    # 4. Wait for all threads to complete
-    print("\n--- Stopping simulation, waiting for threads to finish... ---")
-    for t in threads:
-        t.join()
-
-    print("\n" + "=" * 50)
-    print("--- SIMULATION FINISHED ---")
-    print("=" * 50 + "\n")
-
-    # 5. Show the globally ordered log timeline
-    print("--- Final Log Timeline (sorted by Lamport Clock & Server ID) ---")
-
-    # Sort by the Lamport clock value first, then use server_id as a tie-breaker.
-    # This ensures a deterministic, causally consistent order.
-    sorted_log = sorted(LOG_MANAGER, key=lambda x: (x["clock"], x["server_id"]))
-
-    for log in sorted_log:
-        print(
-            f"Clock: {log['clock']:<3} | Server ID: {log['server_id']} | Event: {log['event']}"
-        )
-# EXP 5
-import xmlrpc.server
-import xmlrpc.client
-import threading
-import time
-from socketserver import ThreadingMixIn
-
-
-# --- 1. The Server's Defined Remote Functions ---
-# --- CHANGE 2: Manually create the ThreadingXMLRPCServer class ---
-class ThreadingXMLRPCServer(ThreadingMixIn, xmlrpc.server.SimpleXMLRPCServer):
-    """
-    This class is a combination of a Threading Server and an XML-RPC Server.
-    This is the standard way to create a multithreaded XML-RPC server.
-    """
-
-    pass
-
-
-def add(numbers):
-    """Takes a list of numbers and returns their sum."""
-    print(f"[Server] Executing 'add' with {numbers}")
-    return sum(numbers)
-
-
-def subtract(numbers):
-    """Takes a list of two numbers [a, b] and returns a - b."""
-    print(f"[Server] Executing 'subtract' with {numbers}")
-    return numbers[0] - numbers[1]
-
-
-def multiply(numbers):
-    """Takes a list of numbers and returns their product."""
-    print(f"[Server] Executing 'multiply' with {numbers}")
-    result = 1
-    for num in numbers:
-        result *= num
-    return result
-
-
-# --- 2. The Server Setup ---
-
-
-def run_server():
-    """Initializes and runs the multithreaded RPC server."""
-    server_address = ("localhost", 8000)
-    server = ThreadingXMLRPCServer(server_address)
-
-    # Register the arithmetic functions for clients to call
-    server.register_function(add, "add")
-    server.register_function(subtract, "subtract")
-    server.register_function(multiply, "multiply")
-
-    print("Arithmetic RPC Server is running on http://localhost:8000...")
-    server.serve_forever()
-
-
-# --- 3. The Client Simulation ---
-
-
-def run_client_simulation():
-    """Simulates a client making several arithmetic calls."""
-    proxy = xmlrpc.client.ServerProxy("http://localhost:8000/")
-
-    try:
-        print("\n--- Client starting RPC calls ---")
-
-        # Call 'add'
-        add_result = proxy.add([10, 20, 30])
-        print(f"[Client] Result of add([10, 20, 30]): {add_result}")
-
-        # Call 'subtract'
-        sub_result = proxy.subtract([100, 33])
-        print(f"[Client] Result of subtract([100, 33]): {sub_result}")
-
-        # Call 'multiply'
-        mul_result = proxy.multiply([5, 2, 10])
-        print(f"[Client] Result of multiply([5, 2, 10]): {mul_result}")
-
-        print("--- Client calls finished ---")
-
-    except Exception as e:
-        print(f"[Client] An error occurred: {e}")
-
-
-# --- 4. Main Execution ---
-
-if __name__ == "__main__":
-    # Start the server in a background thread
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    time.sleep(1)  # Give server time to start
-
-    # Run the client simulation
-    run_client_simulation()
-# EXP 6
-import threading
-import time
-import random
-
-# --- Global State & Configuration ---
-NUM_PROCESSES = 3
-run_simulation = True
-ALL_PROCESSES = {}  # Global dict to hold process instances
-
-
-class Process:
-    def __init__(self, process_id):
-        self.id = process_id
-        # Initialize a vector clock for all processes, starting at 0.
-        self.vector_clock = [0] * NUM_PROCESSES
-
-    def local_event(self):
-        """Rule 1: An internal event occurs."""
-        # Increment the clock for this process's own index.
-        self.vector_clock[self.id] += 1
-        print(f"Process {self.id} | Local Event | Clock: {self.vector_clock}")
-
-    def send_message(self, target_process_id):
-        """Rule 2: Sending a message."""
-        # First, increment own clock for the 'send' event.
-        self.vector_clock[self.id] += 1
-        print(
-            f"Process {self.id} | Send to P{target_process_id} | Clock: {self.vector_clock}"
-        )
-
-        # Send a copy of the vector clock with the message.
-        message = {"sender_id": self.id, "vector": list(self.vector_clock)}
-
-        # Directly call the receive method of the target process.
-        ALL_PROCESSES[target_process_id].receive_message(message)
-
-    def receive_message(self, message):
-        """Rule 3: Receiving a message."""
-        received_vector = message["vector"]
-
-        # Update local vector by taking the element-wise maximum.
-        for i in range(NUM_PROCESSES):
-            self.vector_clock[i] = max(self.vector_clock[i], received_vector[i])
-
-        # Finally, increment own clock for the 'receive' event.
-        self.vector_clock[self.id] += 1
-        print(
-            f"Process {self.id} | Recv from P{message['sender_id']} | Clock: {self.vector_clock}"
-        )
-
-    def run(self):
-        """Main loop for the process thread."""
-        while run_simulation:
-            time.sleep(random.uniform(1, 2))
-            # Randomly choose an action
-            if random.random() > 0.5:
-                self.local_event()
-            else:
-                possible_targets = [i for i in range(NUM_PROCESSES) if i != self.id]
-                if possible_targets:
-                    target_id = random.choice(possible_targets)
-                    self.send_message(target_id)
-
-
-if __name__ == "__main__":
-    # 1. Create all process instances
-    for i in range(NUM_PROCESSES):
-        ALL_PROCESSES[i] = Process(process_id=i)
-
-    # 2. Start all process threads
-    threads = []
-    for i in range(NUM_PROCESSES):
-        thread = threading.Thread(target=ALL_PROCESSES[i].run)
-        threads.append(thread)
-        thread.start()
-
-    # 3. Let the simulation run for a bit
-    time.sleep(10)
-    run_simulation = False
-    print("\n--- Stopping simulation... ---")
-    for t in threads:
-        t.join()
-# EXP 7
-import threading
-import time
-import requests
-from flask import Flask, request, jsonify
-import logging
-
-# --- Configuration & Global State ---
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-NODES = {}
-LEADER_ID = None
-
-
-class Node:
-    def __init__(self, node_id, port):
-        self.id = (
-            node_id  # Requirement: Assign priorities to nodes (ID acts as priority)
-        )
-        self.port = port
-        self.is_leader = False
-        self.is_active = True
-        self.app = Flask(__name__)
-        self._setup_routes()
-
-    def _setup_routes(self):
-        @self.app.route("/election", methods=["POST"])
-        def handle_election():
-            # A lower ID node started an election. I am "bullying" it.
-            print(
-                f"[Node {self.id}] Received election message from a lower ID node. Sending OK and starting my own election."
-            )
-            threading.Thread(target=self.start_election).start()
-            return jsonify({"response": "OK"})
-
-        @self.app.route("/announce", methods=["POST"])
-        def handle_announcement():
-            global LEADER_ID
-            LEADER_ID = request.json["leader_id"]
-            self.is_leader = self.id == LEADER_ID
-            if self.is_leader:
-                print(f"[Node {self.id}] Acknowledged new leader: ME!")
-            else:
-                print(f"[Node {self.id}] Acknowledged new leader: Node {LEADER_ID}")
-            return jsonify({"response": "acknowledged"})
-
-    def start_election(self):
-        """Triggers an election and determines the new coordinator."""
-        print(f"\n[Node {self.id}] --- Starting an election ---")
-        higher_nodes = [n_id for n_id in NODES if n_id > self.id]
-
-        if not higher_nodes:
-            # If no nodes have a higher ID, I am the leader.
-            self.announce_as_leader()
-            return
-
-        got_response = False
-        for n_id in higher_nodes:
-            try:
-                url = f"http://127.0.0.1:{NODES[n_id].port}/election"
-                res = requests.post(url, timeout=0.5)
-                if res.status_code == 200:
-                    print(
-                        f"[Node {self.id}] Got OK from Node {n_id}. I will not be the leader."
-                    )
-                    got_response = True
-            except requests.exceptions.RequestException:
-                print(f"[Node {self.id}] Node {n_id} is down.")
-
-        if not got_response:
-            # If no higher node responded, I am the leader.
-            self.announce_as_leader()
-
-    def announce_as_leader(self):
-        """Announces to all other nodes that this node is the new leader."""
-        global LEADER_ID
-        LEADER_ID = self.id
-        self.is_leader = True
-        print(
-            f"[Node {self.id}] --- Elected as the new LEADER. Announcing to others. ---"
-        )
-
-        for n_id, node_instance in NODES.items():
-            if n_id != self.id and node_instance.is_active:
-                try:
-                    url = f"http://127.0.0.1:{node_instance.port}/announce"
-                    requests.post(url, json={"leader_id": self.id}, timeout=0.5)
-                except requests.exceptions.RequestException:
-                    pass
-
-    def run(self):
-        threading.Thread(
-            target=lambda: self.app.run(port=self.port), daemon=True
-        ).start()
-
-
-# --- Main Simulation ---
-
-if __name__ == "__main__":
-    num_nodes = 4
-    for i in range(num_nodes):
-        node_id = i + 1
-        NODES[node_id] = Node(node_id, port=5000 + node_id)
-        NODES[node_id].run()
-        print(f"Node {node_id} started.")
-
-    # Let's assume Node 4 (highest ID) is the initial leader.
-    LEADER_ID = 4
-    NODES[4].is_leader = True
-    print(f"\nInitial State: Node {LEADER_ID} is the leader.\n")
-    time.sleep(2)
-
-    # Requirement: Simulate node failure.
-    print(f"--- Simulating CRASH of Leader Node {LEADER_ID} ---")
-    NODES[LEADER_ID].is_active = False
-
-    # Requirement: Trigger election.
-    # In a real system, any node could detect this. Here, we'll have Node 2 detect it.
-    print("Node 2 detects the leader is down and starts an election.\n")
-    time.sleep(1)
-    NODES[2].start_election()
-
-    # The simulation will run and display the election steps in the console.
-    time.sleep(5)
-    print("\n--- Simulation finished. ---")
-    print(f"Final Leader: Node {LEADER_ID}")
-# EXP 8
-import threading
-import time
-import random
-
-# --- Global State & Configuration ---
-NUM_PROCESSES = 5
-ALL_PROCESSES = {}  # Global dict to hold process instances and their state
-LEADER_ID = -1
-
-
-class Process:
-    def __init__(self, process_id):
-        self.id = process_id
-        self.is_active = True
-        self.is_participant = False  # Flag to see if it's already in an election
-
-    def get_successor(self):
-        """Finds the next active process in the ring."""
-        next_id = (self.id + 1) % NUM_PROCESSES
-        while next_id != self.id:
-            if ALL_PROCESSES[next_id]["instance"].is_active:
-                return ALL_PROCESSES[next_id]["instance"]
-            next_id = (next_id + 1) % NUM_PROCESSES
-        return self  # Should not happen in a ring with >1 active nodes
-
-    def start_election(self):
-        """Initiates an election by sending a message to its successor."""
-        if not self.is_active:
-            return
-
-        print(f"[Process {self.id}] Detects leader failure. Starting an election.")
-        self.is_participant = True
-
-        # Create the initial election message with its own ID
-        election_message = [self.id]
-
-        successor = self.get_successor()
-        print(
-            f"[Process {self.id}] Passing ELECTION message {election_message} to Process {successor.id}"
-        )
-        successor.handle_election_message(election_message)
-
-    def handle_election_message(self, message):
-        """Processes a received election message."""
-        if not self.is_active:
-            return
-
-        # If this process's ID is in the message, the message has completed a full circle.
-        if self.id in message:
-            # The election is over. Determine the new leader and announce it.
-            new_leader_id = max(message)
-            self.announce_leader(new_leader_id)
-            return
-
-        # Add my ID to the list
-        message.append(self.id)
-
-        # Pass the updated message clockwise
-        successor = self.get_successor()
-        print(
-            f"[Process {self.id}] Adding my ID. Passing ELECTION message {message} to Process {successor.id}"
-        )
-        successor.handle_election_message(message)
-
-    def announce_leader(self, new_leader_id):
-        """Handles the announcement of the new leader."""
-        global LEADER_ID
-
-        # If this announcement has already been seen, stop forwarding it.
-        if LEADER_ID == new_leader_id:
-            return
-
-        LEADER_ID = new_leader_id
-
-        if self.id == new_leader_id:
-            print(f"\n[Process {self.id}] --- I AM THE NEW LEADER ---")
-        else:
-            print(
-                f"[Process {self.id}] Acknowledged new leader: Process {new_leader_id}"
-            )
-
-        # Forward the announcement message around the ring
-        self.get_successor().announce_leader(new_leader_id)
-
-
-# --- Main Simulation ---
-
-
-def monitor_leader():
-    """A simple external monitor to detect leader failure and trigger an election."""
-    global LEADER_ID
-    time.sleep(3)  # Give time for initial state
-
-    # Requirement: On failure of leader -> initiate election.
-    if LEADER_ID != -1 and not ALL_PROCESSES[LEADER_ID]["instance"].is_active:
-        print(f"\n[Monitor] Detected that Leader {LEADER_ID} has failed.")
-
-        # Pick a random, non-leader process to start the election
-        initiator_id = random.choice(
-            [i for i in range(NUM_PROCESSES) if i != LEADER_ID]
-        )
-        print(f"[Monitor] Telling Process {initiator_id} to start a new election.\n")
-        ALL_PROCESSES[initiator_id]["instance"].start_election()
-
-
-if __name__ == "__main__":
-    # 1. Create N processes arranged in a ring.
-    for i in range(NUM_PROCESSES):
-        ALL_PROCESSES[i] = {"instance": Process(process_id=i)}
-
-    # 2. Assume the process with the highest ID is the initial leader.
-    initial_leader_id = NUM_PROCESSES - 1
-    LEADER_ID = initial_leader_id
-    print(
-        f"--- Initial State: {NUM_PROCESSES} processes in a ring. Process {LEADER_ID} is the leader. ---\n"
-    )
-
-    # 3. Simulate failure of the leader.
-    time.sleep(2)
-    print(f"--- Simulating CRASH of Leader Process {initial_leader_id} ---")
-    ALL_PROCESSES[initial_leader_id]["instance"].is_active = False
-
-    # 4. Use a monitor to detect the failure and start the election process.
-    monitor_thread = threading.Thread(target=monitor_leader)
-    monitor_thread.start()
-    monitor_thread.join()
-
-    time.sleep(2)  # Allow time for announcement to circulate
-    print("\n--- Simulation Finished ---")
-    print(f"Final determined leader: Process {LEADER_ID}")
-# EXP 9
-import threading
-import time
-import requests
-from flask import Flask, request, jsonify
-import logging
-
-# --- Configuration & Global State ---
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-NUM_REPLICAS = 3
-REPLICAS = {}  # Holds the Node instances
-
-
-class ReplicaNode:
-    def __init__(self, node_id, port):
-        self.id = node_id
-        self.port = port
-        self.key_value_store = {}  # Each node has its own data store
-        self.app = Flask(f"Node_{node_id}")
-        self._setup_routes()
-
-    def _setup_routes(self):
-        # Endpoint to set a value (client interaction)
-        @self.app.route("/set", methods=["POST"])
-        def set_value():
-            data = request.json
-            key, value = data["key"], data["value"]
-            print(f"[Node {self.id}] Received WRITE: key='{key}', value='{value}'")
-            self.key_value_store[key] = value
-            # Propagate the update to other nodes after a delay
-            threading.Thread(target=self.propagate_update, args=(key, value)).start()
-            return jsonify({"status": "ok"})
-
-        # Endpoint to get a value (client interaction)
-        @self.app.route("/get/<key>", methods=["GET"])
-        def get_value(key):
-            value = self.key_value_store.get(key, "not_found")
-            return jsonify({"key": key, "value": value, "node_id": self.id})
-
-        # Endpoint for internal replication
-        @self.app.route("/replicate", methods=["POST"])
-        def replicate_value():
-            data = request.json
-            key, value = data["key"], data["value"]
-            print(
-                f"[Node {self.id}] Received REPLICATION: key='{key}', value='{value}'"
-            )
-            self.key_value_store[key] = value
-            return jsonify({"status": "replicated"})
-
-    def propagate_update(self, key, value):
-        """Sends the update to all other replicas with a delay."""
-        # The delay is what causes the temporary inconsistency
-        time.sleep(2)
-        print(f"[Node {self.id}] Propagating update for key '{key}'...")
-        for node_id, node_instance in REPLICAS.items():
-            if node_id != self.id:
-                try:
-                    url = f"http://127.0.0.1:{node_instance.port}/replicate"
-                    requests.post(url, json={"key": key, "value": value}, timeout=1)
-                except requests.exceptions.RequestException:
-                    pass  # Ignore if a node is down
-
-    def run(self):
-        threading.Thread(
-            target=lambda: self.app.run(port=self.port), daemon=True
-        ).start()
-
-
-# --- Main Simulation ---
-if __name__ == "__main__":
-    # 1. Create 3 replica nodes
-    for i in range(NUM_REPLICAS):
-        node_id = i + 1
-        REPLICAS[node_id] = ReplicaNode(node_id, port=5000 + node_id)
-        REPLICAS[node_id].run()
-        print(f"Replica Node {node_id} started on port {5000 + node_id}")
-
-    time.sleep(1)
-    print("\n--- Simulating Eventual Consistency ---")
-    print(
-        "Difference: A strongly consistent system would block the write until all replicas confirm. An eventually consistent system responds immediately and replicates in the background.\n"
-    )
-
-    # 2. Write a value to ONE replica
-    print("STEP 1: Writing 'my_key' = 'initial_value' to Node 1...")
-    requests.post(
-        "http://127.0.0.1:5001/set", json={"key": "my_key", "value": "initial_value"}
-    )
-
-    # 3. Immediately read from ALL replicas
-    print("\nSTEP 2: Immediately reading 'my_key' from all nodes...")
-    for i in range(1, NUM_REPLICAS + 1):
-        res = requests.get(f"http://127.0.0.1:500{i}/get/my_key")
-        print(f"  -> Read from Node {i}: {res.json()}")
-    print("   (Note the inconsistency: Node 1 has the new value, others don't yet)")
-
-    # 4. Wait for propagation delay
-    print("\nSTEP 3: Waiting 3 seconds for replication to complete...")
-    time.sleep(3)
-
-    # 5. Read from ALL replicas again
-    print("\nSTEP 4: Reading 'my_key' from all nodes again...")
-    for i in range(1, NUM_REPLICAS + 1):
-        res = requests.get(f"http://127.0.0.1:500{i}/get/my_key")
-        print(f"  -> Read from Node {i}: {res.json()}")
-    print("   (Note: The system is now consistent)")
-# EXP 10
-import threading
-import time
-from flask import Flask, request, jsonify
-import requests
-
-# --- Server Setup ---
-app = Flask(__name__)
-
-
-@app.route("/process", methods=["POST"])
-def process_text():
-    """
-    An endpoint that processes a client's text request.
-    This function will be run in a new thread for each client by Flask.
-    """
-    client_id = request.json.get("id", "Unknown")
-    text = request.json.get("text", "")
-
-    # Identify the thread handling this request
-    thread_name = threading.current_thread().name
-    print(f"[Thread: {thread_name}] Started processing request from Client {client_id}")
-
-    # Simulate a time-consuming task
-    time.sleep(3)
-
-    # Process the text (e.g., convert to uppercase)
-    processed_text = text.upper()
-
-    print(f"[Thread: {thread_name}] Finished processing for Client {client_id}")
-    return jsonify({"original": text, "processed": processed_text})
-
-
-# --- Client Simulation ---
-def client_simulation(client_id, text_to_send):
-    """A function to simulate a single client making a request."""
-    print(f"[Client {client_id}] Sending request...")
-    try:
-        res = requests.post(
-            "http://127.0.0.1:5000/process",
-            json={"id": client_id, "text": text_to_send},
-        )
-        print(f"[Client {client_id}] Got response: {res.json()}")
-    except requests.exceptions.RequestException as e:
-        print(f"[Client {client_id}] Error: {e}")
-
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    # 1. Start the Flask server in a background thread
-    # The 'threaded=True' argument is what makes Flask handle each request in a new thread.
-    server_thread = threading.Thread(
-        target=lambda: app.run(port=5000, threaded=True), daemon=True
-    )
-    server_thread.start()
-    time.sleep(1)
-
-    print("--- Simulating 3 clients connecting concurrently ---")
-
-    # 2. Create and start threads for multiple clients
-    client1 = threading.Thread(target=client_simulation, args=(1, "hello server"))
-    client2 = threading.Thread(
-        target=client_simulation, args=(2, "this is another client")
-    )
-    client3 = threading.Thread(target=client_simulation, args=(3, "a third request"))
-
-    client1.start()
-    client2.start()
-    client3.start()
-
-    # 3. Wait for all clients to finish
-    client1.join()
-    client2.join()
-    client3.join()
-
-    print("\n--- Simulation finished ---")
-# EXP 11
-import threading
-import time
-from flask import Flask, request, jsonify
-import requests
-
-
-# --- Backend Server Simulation ---
-# We simulate them as simple functions instead of full threads for simplicity.
-def backend_server_1(request_data):
-    """Simulates processing by backend server 1."""
-    print(f"[Backend 1] Processing request: {request_data}")
-    time.sleep(2)  # Simulate work
-    return "Response from Backend Server 1"
-
-
-def backend_server_2(request_data):
-    """Simulates processing by backend server 2."""
-    print(f"[Backend 2] Processing request: {request_data}")
-    time.sleep(2)
-    return "Response from Backend Server 2"
-
-
-def backend_server_3(request_data):
-    """Simulates processing by backend server 3."""
-    print(f"[Backend 3] Processing request: {request_data}")
-    time.sleep(2)
-    return "Response from Backend Server 3"
-
-
-BACKEND_SERVERS = [backend_server_1, backend_server_2, backend_server_3]
-current_server_index = 0
-lock = threading.Lock()  # To safely update the index in a threaded environment
-
-# --- Load Balancer Module ---
-app = Flask(__name__)
-
-
-@app.route("/request", methods=["POST"])
-def load_balancer():
-    """
-    Implements a Round Robin load balancer.
-    It forwards the request to the next available backend server.
-    """
-    global current_server_index
-
-    # Use a lock to prevent a race condition on the index
-    with lock:
-        # Select the next server in the list
-        target_server = BACKEND_SERVERS[current_server_index]
-
-        # Update the index for the next request, wrapping around if necessary
-        current_server_index = (current_server_index + 1) % len(BACKEND_SERVERS)
-
-    print(f"[Load Balancer] Forwarding request to {target_server.__name__}")
-
-    # Forward the request and get the response
-    response_from_backend = target_server(request.json)
-
-    return jsonify({"response": response_from_backend})
-
-
-# --- Client Simulation ---
-def run_client(client_id):
-    """Simulates a client sending a request to the load balancer."""
-    print(f"[Client {client_id}] Sending request to load balancer...")
-    try:
-        res = requests.post(
-            "http://127.0.0.1:5000/request",
-            json={"data": f"Hello from client {client_id}"},
-        )
-        print(f"[Client {client_id}] Received response: {res.json()}")
-    except requests.exceptions.RequestException:
-        pass
-
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    # Start the load balancer server in a background thread
-    server_thread = threading.Thread(
-        target=lambda: app.run(port=5000, threaded=True), daemon=True
-    )
-    server_thread.start()
-    time.sleep(1)
-
-    print("--- Simulating 5 client requests to the load balancer ---\n")
-
-    client_threads = []
-    for i in range(5):
-        # We start clients in quick succession
-        client_thread = threading.Thread(target=run_client, args=(i + 1,))
-        client_threads.append(client_thread)
-        client_thread.start()
-        time.sleep(0.2)
-
-    for t in client_threads:
-        t.join()
-
-    print("\n--- Load distribution printed above. Simulation finished. ---")
+# -*- coding: utf-8 -*-
+"""ml_lab_ese
+
+Automatically generated by Colab.
+
+Original file is located at
+    https://colab.research.google.com/drive/1kReD6JM-uBcxdbajGBy24jRwzkBj-TrM
+
+**Simple Linear Regression**
+"""
+
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+import math
 
+# dataset
+data = pd.DataFrame({
+    'Hours': [1, 2, 3, 4, 5],
+    'Marks': [52, 57, 63, 68, 72]
+})
+
+X = data[['Hours']]
+y = data['Marks']
+
+# model
+model = LinearRegression()
+model.fit(X, y)
+
+# prediction
+pred = model.predict(X)
+
+# rmse
+rmse = math.sqrt(mean_squared_error(y, pred))
+
+print("Slope:", model.coef_[0])
+print("Intercept:", model.intercept_)
+print("Predictions:", pred)
+print("RMSE:", rmse)
+
+# plotting
+plt.scatter(X, y, label='Actual Data')
+plt.plot(X, pred, label='Regression Line')
+plt.xlabel('Hours')
+
+plt.title('Simple Linear Regression')
+plt.legend()
+plt.show()
+# m = [nΣXY - (ΣX)(ΣY)] / [nΣX² - (ΣX)²]
+# c = Ȳ - mX̄
+
+"""**Multiple Linear Regression**"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+data = pd.DataFrame({
+    'Area': [1000, 1200, 1500, 1800, 2000, 2200, 2500, 2700],
+    'Bedrooms': [2, 2, 3, 3, 4, 4, 5, 5],
+    'Age': [10, 8, 7, 6, 5, 4, 3, 2],
+    'Price': [50, 55, 65, 72, 80, 90, 100, 110]
+}) 
+
+X = data[['Area', 'Bedrooms', 'Age']]
+y = data['Price']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+
+print("Intercept:", model.intercept_)
+print("RMSE:", rmse)
+
+plt.figure(figsize=(8, 6))
+plt.scatter(y_test, y_pred)
+plt.show()
+
+"""**Decision Tree**"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
+from sklearn.tree import DecisionTreeClassifier,plot_tree
+from sklearn.model_selection import train_test_split
+
+data=pd.DataFrame({
+    'Exam_score': [2, 1, 3, 5, 6, 7, 4, 2, 8, 3],
+    'Interview_score': [3, 5, 2, 6, 7, 8, 5, 1, 9, 4],
+    'CGPA': [1, 2, 1, 4, 5, 6, 3, 2, 7, 2],
+    'Admission':    [0, 0, 0, 1, 1, 1, 1, 0, 1, 0]
+})
+
+X = data[['Exam_score', 'Interview_score', 'CGPA']]
+y = data['Admission']
+
+X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=0.2)
+print(X_train)
+
+classifier=DecisionTreeClassifier(criterion="gini")
+classifier.fit(X_train,y_train)
+
+y_train_pred=classifier.predict(X_train)
+y_test_pred=classifier.predict(X_test)
+
+train_accuracy=accuracy_score(y_train,y_train_pred)
+test_accuracy=accuracy_score(y_test,y_test_pred)
+
+print("Training Accuracy:",train_accuracy)
+print("Testing Accuracy:",test_accuracy)
+
+plt.figure(figsize=(10,6))
+plot_tree(classifier, feature_names=['Exam_score','Interview_score','GPA'], class_names=['Class 0','Class 1'], filled=True)
+plt.title("Decision Tree using Gini")
+plt.show()
+
+"""**KNN**"""
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score
+
+# dataset
+data = pd.DataFrame({
+    'Age': [22, 25, 28, 35, 42, 30, 45, 50, 27, 38],
+    'EstimatedSalary': [25000, 32000, 48000, 65000, 85000, 54000, 92000, 110000, 73000, 67000],
+    'Purchased': [0, 0, 0, 1, 1, 0, 1, 1, 1, 1]
+})
+
+# missing values
+data.fillna(data.mean(), inplace=True)
+
+# input and output
+X = data[['Age', 'EstimatedSalary']]
+y = data['Purchased']
+
+# split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+
+# scaling
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+best_accuracy = 0
+best_k = 1
+
+# try different K
+for k in range(1, 6):
+    model = KNeighborsClassifier(n_neighbors=k, metric='euclidean')
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+
+    print(f"K={k}, Accuracy={acc}")
+
+    if acc > best_accuracy:
+        best_accuracy = acc
+        best_k = k
+
+# final model
+model = KNeighborsClassifier(n_neighbors=best_k, metric='euclidean')
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+print("\nBest K:", best_k)
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+print("Precision:", precision_score(y_test, y_pred))
+print("Recall:", recall_score(y_test, y_pred))
+print("F1 Score:", f1_score(y_test, y_pred))
+
+"""**Linear SVM**"""
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+import matplotlib.pyplot as plt
+
+# linear dataset
+data = pd.DataFrame({
+    'X1': [1, 2, 3, 4, 5, 6, 7, 8],
+    'X2': [2, 3, 2, 4, 5, 6, 5, 7],
+    'Class': [0, 0, 0, 0, 1, 1, 1, 1]
+})
+
+X = data[['X1', 'X2']]
+y = data['Class']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+
+# linear SVM
+model = SVC(kernel='linear')
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+cm = confusion_matrix(y_test, y_pred)
+
+print("Linear SVM Accuracy:", accuracy_score(y_test, y_pred))
+print("Confusion Matrix:")
+print(cm)
+
+"""**Non-Linear SVM- RBF Kernal**"""
+
+import pandas as pd
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+# generate non-linear dataset
+X, y = make_moons(n_samples=500, noise=0.25, random_state=42)
+
+# convert to dataframe
+data = pd.DataFrame(X, columns=['X1', 'X2'])
+data['Class'] = y
+
+X = data[['X1', 'X2']]
+y = data['Class']
+
+# split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+
+# non-linear SVM
+model = SVC(kernel='rbf')
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+cm = confusion_matrix(y_test, y_pred)
+
+print("Non-Linear SVM Accuracy:", accuracy)
+print("Confusion Matrix:")
+print(cm)
+
+"""**Random Forest Classification**"""
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+# dataset
+data = pd.DataFrame({
+    'Age': [22, 25, 30, 34, 42, 46, 50, 55, 35, 25],
+    'Salary': [25000, 30000, 22000, 40000, 55000, 70000, 35000, 80000, 110000, 65000],
+    'Purchased': [0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
+})
+
+# input and output
+X = data[['Age', 'Salary']]
+y = data['Purchased']
+
+# split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# random forest model
+classifier = RandomForestClassifier(n_estimators=10, random_state=42)
+classifier.fit(X_train, y_train)
+
+# predictions
+train_pred = classifier.predict(X_train)
+test_pred = classifier.predict(X_test)
+
+# accuracy
+train_acc = accuracy_score(y_train, train_pred)
+test_acc = accuracy_score(y_test, test_pred)
+
+# confusion matrix
+cm = confusion_matrix(y_test, test_pred)
+
+print("Training Accuracy:", train_acc)
+print("Testing Accuracy:", test_acc)
+print("Confusion Matrix:")
+print(cm)
+
+# new sample prediction
+sample = pd.DataFrame({
+    'Age': [40],
+    'Salary': [60000]
+})
+
+prediction = classifier.predict(sample)
+
+if prediction[0] == 1:
+    print("Purchased")
+else:
+    print("Not Purchased")
+
+"""**Random Forest Regression**"""
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_squared_error
+
+# dataset
+data = pd.DataFrame({
+    'hours_studied': [1,2,3,4,5,6,7,8,9,10],
+    'sleep_hours': [8,7,8,6,7,6,5,6,5,4],
+    'attendance': [60,65,70,72,75,80,85,88,90,95],
+    'exam_score': [35,40,50,55,65,70,75,85,90,95]
+})
+
+# input and output
+X = data[['hours_studied', 'sleep_hours', 'attendance']]
+y = data['exam_score']
+
+# split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# random forest regression model
+model = RandomForestRegressor(n_estimators=10, max_depth=2, random_state=42)
+model.fit(X_train, y_train)
+
+# predictions
+train_pred = model.predict(X_train)
+test_pred = model.predict(X_test)
+
+# evaluation
+train_r2 = r2_score(y_train, train_pred)
+test_r2 = r2_score(y_test, test_pred)
+
+train_mse = mean_squared_error(y_train, train_pred)
+test_mse = mean_squared_error(y_test, test_pred)
+
+print("Training R2:", train_r2)
+print("Testing R2:", test_r2)
+print("Training MSE:", train_mse)
+print("Testing MSE:", test_mse)
+
+# new sample prediction
+sample = pd.DataFrame({
+    'hours_studied': [3],
+    'sleep_hours': [8],
+    'attendance': [80]
+})
+
+prediction = model.predict(sample)
+
+print("Predicted Exam Score:", prediction[0])
+
+"""**Boosting - ada,xg,gbm,lightgbm**"""
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+
+# dataset
+data = pd.DataFrame({
+    'Age': [22, 25, 30, 34, 42, 46, 50, 55, 35, 25],
+    'Salary': [25000, 30000, 22000, 40000, 55000, 70000, 35000, 80000, 110000, 65000],
+    'Purchased': [0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
+})
+
+# input and output
+X = data[['Age', 'Salary']]
+y = data['Purchased']
+
+# split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+models = {
+    'AdaBoost': AdaBoostClassifier(n_estimators=100, random_state=42),
+    'Gradient Boosting': GradientBoostingClassifier(n_estimators=100, random_state=42),
+    'XGBoost': XGBClassifier(n_estimators=100, eval_metric='logloss', random_state=42),
+    # 'LightGBM': LGBMClassifier(n_estimators=100,random_state=42)
+}
+
+for name, model in models.items():
+    model.fit(X_train, y_train)
+
+    train_pred = model.predict(X_train)
+    test_pred = model.predict(X_test)
+
+    train_acc = accuracy_score(y_train, train_pred)
+    test_acc = accuracy_score(y_test, test_pred)
+
+    precision = precision_score(y_test, test_pred)
+    recall = recall_score(y_test, test_pred)
+    f1 = f1_score(y_test, test_pred)
+
+    print(f"\n{name}")
+    print("Training Accuracy:", train_acc)
+    print("Testing Accuracy:", test_acc)
+    print("Precision:", precision)
+    print("Recall:", recall)
+    print("F1 Score:", f1)
+
+"""**K-means**"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.datasets import make_blobs
+
+# generate dataset
+X, y = make_blobs(
+    n_samples=300,
+    centers=3,
+    random_state=42
+)
+
+# convert to dataframe
+data = pd.DataFrame(X, columns=['Feature1', 'Feature2'])
+
+# visualize data
+plt.scatter(data['Feature1'], data['Feature2'])
+plt.title("Original Data")
+plt.show()
+
+# elbow method
+inertia = []
+
+for k in range(1, 6):
+    model = KMeans(n_clusters=k, random_state=42)
+    model.fit(data)
+    inertia.append(model.inertia_)
+
+# elbow plot
+plt.plot(range(1, 6), inertia, marker='o')
+plt.xlabel("Number of Clusters (K)")
+plt.title("Elbow Method")
+plt.show()
+
+# final model
+optimal_k = 3
+
+model = KMeans(n_clusters=optimal_k, random_state=42)
+labels = model.fit_predict(data)
+
+# silhouette score
+score = silhouette_score(data, labels)
+
+print("Optimal K:", optimal_k)
+print("Silhouette Score:", score)
+
+# clustered data
+plt.scatter(data['Feature1'], data['Feature2'], c=labels)
+plt.title("K-Means Clustering")
+plt.show()
+
+"""**EM**"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.mixture import GaussianMixture
+
+# dataset
+data = pd.DataFrame({
+    'Height': [150, 152, 149, 155, 158, 170, 172, 168, 175, 178],
+    'Weight': [50, 52, 48, 54, 56, 72, 75, 70, 78, 80]
+})
+
+# model
+model = GaussianMixture(n_components=2, random_state=42)
+model.fit(data)
+
+# predictions
+labels = model.predict(data)
+probs = model.predict_proba(data)
+
+print("Cluster Labels:")
+print(labels)
+
+print("Probabilities:")
+print(probs)
+
+# plot
+plt.scatter(data['Height'], data['Weight'], c=labels)
+plt.xlabel("Height")
+plt.title("Expectation Maximization (Gaussian Mixture Model)")
+plt.show()
+
+"""**PCA**"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.datasets import make_blobs
+
+# generate dataset
+X, y = make_blobs(
+    n_samples=500,
+    centers=3,
+    n_features=4,
+    random_state=42
+)
+
+# convert to dataframe
+data = pd.DataFrame(X, columns=['Feature1', 'Feature2', 'Feature3', 'Feature4'])
+
+# scaling
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(data)
+
+# PCA model
+model = PCA(n_components=2)
+X_pca = model.fit_transform(X_scaled)
+
+print("Transformed Data:")
+print(X_pca)
+
+print("Explained Variance Ratio:")
+print(model.explained_variance_ratio_)
+
+# plot
+plt.scatter(X_pca[:, 0], X_pca[:, 1], c=y)
+plt.xlabel("Principal Component 1")
+
+plt.title("PCA Dimensionality Reduction")
+plt.show()
+
+"""**SVD**"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import TruncatedSVD
+from sklearn.datasets import make_blobs
+
+# generate dataset
+X, y = make_blobs(
+    n_samples=500,
+    centers=3,
+    n_features=4,
+    random_state=42
+)
+
+# convert to dataframe
+data = pd.DataFrame(X, columns=['Feature1', 'Feature2', 'Feature3', 'Feature4'])
+
+# scaling
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(data)
+
+# SVD model
+model = TruncatedSVD(n_components=2)
+X_svd = model.fit_transform(X_scaled)
+
+print("Transformed Data:")
+print(X_svd)
+
+print("Explained Variance Ratio:")
+print(model.explained_variance_ratio_)
+
+# plot
+plt.scatter(X_svd[:, 0], X_svd[:, 1], c=y)
+plt.xlabel("Component 1")
+
+plt.title("SVD Dimensionality Reduction")
+plt.show()
+
+"""**LDA**"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+# generate dataset
+X, y = make_blobs(
+    n_samples=300,
+    centers=3,
+    n_features=4,
+    random_state=42
+)
+
+# convert to dataframe
+data = pd.DataFrame(X, columns=['Feature1', 'Feature2', 'Feature3', 'Feature4'])
+
+# scaling
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(data)
+
+# LDA model
+model = LinearDiscriminantAnalysis(n_components=2)
+X_lda = model.fit_transform(X_scaled, y)
+
+print("Transformed Data:")
+print(X_lda)
+
+# plot
+plt.scatter(X_lda[:, 0], X_lda[:, 1], c=y)
+plt.xlabel("LD1")
+
+plt.title("LDA Projection")
+plt.show()
 </textarea>
 
     <script>
