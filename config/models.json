@@ -20,5 +20,5 @@
       "rpd": null
     }
   ],
-  "retry": { "overloadBaseMs": 2000, "overloadCapMs": 2000, "overloadJitterMs": 500 }
+  "retry": { "overloadBaseMs": 2000, "overloadCapMs": 2000, "overloadJitterMs": 500, "overloadModelCoolMs": 60000 }
 }
