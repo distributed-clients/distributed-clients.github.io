@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "gemini-3.6-flash",
+      "generationConfig": { "thinkingConfig": { "thinkingLevel": "low" }, "temperature": 0.2 },
+      "rpm": 5,
+      "rpd": null
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "generationConfig": { "thinkingConfig": { "thinkingLevel": "low" } },
+      "rpm": 15,
+      "rpd": 500
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "generationConfig": { "thinkingConfig": { "thinkingLevel": "low" } },
+      "rpm": 5,
+      "rpd": null
+    }
+  ],
+  "retry": { "overloadBaseMs": 2000, "overloadCapMs": 2000, "overloadJitterMs": 500 }
+}

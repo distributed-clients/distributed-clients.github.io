@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { pbkdf2Sync, createCipheriv, randomBytes } from "node:crypto";
 
 function usage() {
   console.error(
-    "Usage: node tools/generate-encrypted-json.mjs <input-users-json-file> [output-html-file]",
+    "Usage: node tools/generate-encrypted-json.mjs [input] [output]  (run from site/; input defaults to private/file.json, output to json/index.html)",
   );
 }
 
 function buildHtml(embeddedUsers) {
-  const usersJson = JSON.stringify(embeddedUsers);
+  const usersJson = JSON.stringify(embeddedUsers).replace(/</g, "\\u003c");
 
   return `<!doctype html>
 <html lang="en">
@@ -89,6 +90,54 @@ function normalizeEncryptContent(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+const GEMINI_KEY = /^(?:AIza[0-9A-Za-z_-]{35}|AQ\.[0-9A-Za-z_.-]{50})$/;
+const GEMINI_FIELDS = ["userGeminiApiKeys", "userGeminiApiKey", "geminiApiKeys", "geminiApiKey", "gemini"];
+// Every alias the extension reads for the removed providers (import.js), plus obsolete settings.
+const DROPPED_FIELDS = [
+  "userGroqApiKeys", "userGroqApiKey", "groqApiKeys", "groqApiKey", "groq",
+  "userMistralApiKeys", "userMistralApiKey", "mistralApiKeys", "mistralApiKey", "mistral",
+  "userOllamaApiKeys", "userOllamaApiKey",
+  "geminiConcurrency",
+];
+
+const splitKeys = (v) =>
+  (Array.isArray(v) ? v : [v]).flatMap((e) => (typeof e === "string" ? e.split(/[\n,]/) : [])).map((e) => e.trim()).filter(Boolean);
+
+// Object payloads: force logging on, merge every Gemini field into one userGeminiApiKeys
+// (valid shapes only), rescue Gemini-shaped keys from removed-provider fields, drop those
+// fields. Strings pass through.
+function prepareEncrypt(user, value, shared = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    if (typeof value === "string") {
+      console.error(`Note: '${user}' encrypt is a string; passed through unchanged (no shared keys added)`);
+    }
+    return value;
+  }
+  const copy = { ...value, enableDetailedLogging: true };
+  const gemini = [];
+  let moved = 0, dropped = 0;
+  const take = (e, fromProvider) => {
+    if (!GEMINI_KEY.test(e)) { dropped++; return; }
+    if (!gemini.includes(e)) { gemini.push(e); if (fromProvider) moved++; }
+  };
+  for (const f of GEMINI_FIELDS) {
+    for (const e of splitKeys(copy[f])) take(e, false);
+    delete copy[f];
+  }
+  for (const f of DROPPED_FIELDS) {
+    for (const e of splitKeys(copy[f])) {
+      if (GEMINI_KEY.test(e)) take(e, true); else dropped++;
+    }
+    delete copy[f];
+  }
+  if (moved || dropped) {
+    console.error(`Note: '${user}' moved ${moved} Gemini-shaped key(s) from provider lists, dropped ${dropped} other entr(ies)`);
+  }
+  if (gemini.length) copy.userGeminiApiKeys = gemini;
+  if (shared.length) copy.sharedGeminiApiKeys = shared;
+  return copy;
+}
+
 function buildEncryptedPayload(plainText, passphrase, filename) {
   const inputBuffer = Buffer.from(plainText, "utf8");
   const salt = randomBytes(16);
@@ -114,15 +163,18 @@ function buildEncryptedPayload(plainText, passphrase, filename) {
 }
 
 async function main() {
-  const [, , inputFile, outputFileArg] = process.argv;
+  const [, , inputFile = "private/file.json", outputFileArg] = process.argv;
 
-  if (!inputFile) {
+  const outputFile = outputFileArg || "json/index.html";
+  let inputText;
+  try {
+    inputText = await readFile(inputFile, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    console.error(`Error: input ${inputFile} not found`);
     usage();
     process.exit(1);
   }
-
-  const outputFile = outputFileArg || "json/index.html";
-  const inputText = await readFile(inputFile, "utf8");
   const inputObject = JSON.parse(inputText);
 
   if (
@@ -132,6 +184,16 @@ async function main() {
   ) {
     throw new Error("Input must be a JSON object keyed by username");
   }
+
+  // shared.json beside the input: {"geminiApiKeys": [...]} goes into every object payload.
+  let shared = [];
+  try {
+    const sharedText = await readFile(join(dirname(inputFile), "shared.json"), "utf8");
+    shared = splitKeys(JSON.parse(sharedText).geminiApiKeys).filter((k) => GEMINI_KEY.test(k));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new Error(`shared.json unreadable: ${error.message}`);
+  }
+  if (shared.length) console.error(`Note: adding ${shared.length} shared key(s) from shared.json`);
 
   const embeddedUsers = {};
   const entries = Object.entries(inputObject);
@@ -160,7 +222,9 @@ async function main() {
       throw new Error(`User '${user}' is missing encrypt field`);
     }
 
-    const plainText = normalizeEncryptContent(definition.encrypt);
+    const plainText = normalizeEncryptContent(
+      prepareEncrypt(user, definition.encrypt, shared),
+    );
     const filename =
       typeof definition.filename === "string" && definition.filename.trim()
         ? definition.filename.trim()
@@ -177,7 +241,7 @@ async function main() {
   await writeFile(outputFile, html, "utf8");
   console.log(`Generated encrypted page at ${outputFile}`);
   console.log(
-    "URL format: https://distributed-clients.github.io/distributed-clients/json/?user=<user>&key=<passphrase>",
+    "URL format: https://distributed-clients.github.io/json/?user=<user>",
   );
 }
 
